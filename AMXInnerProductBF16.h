@@ -43,17 +43,20 @@ private:
     std::chrono::duration<double> actual_amx_time;
     std::chrono::duration<double> tile_load_time;
 
+    // Initialization methods
+    static void init_tile_config(__tilecfg *tileinfo);
+
     // Helper functions for type conversion
     static bfloat16_t float_to_bfloat16(float f);
     static float bfloat16_to_float(bfloat16_t bf16);
 
     // Formatting functions
-    void padVectors(std::vector<std::vector<float>> &vectors);
+    void padVectors(std::vector<std::vector<bfloat16_t>> &vectors);
     void centroid_format(std::vector<std::vector<bfloat16_t>> &centroids, std::vector<std::vector<bfloat16_t>> &centroid_chunk);
     void data_format(std::vector<std::vector<bfloat16_t>> &data, std::vector<bfloat16_t> &data_chunk, int data_num, int element_num);
 
     // Computation and merging functions
-    void main_multiply(std::vector<std::vector<bfloat16_t>> &results_agg, std::vector<std::vector<bfloat16_t>> &centroids, std::vector<std::vector<bfloat16_t>> &data);    
+    void main_multiply(std::vector<std::vector<float>> &results_agg, std::vector<std::vector<bfloat16_t>> &centroids, std::vector<std::vector<bfloat16_t>> &data);    
     
     // Printing methods
     void print_bfloat16_vectors(const std::vector<std::vector<bfloat16_t>> &vecs);

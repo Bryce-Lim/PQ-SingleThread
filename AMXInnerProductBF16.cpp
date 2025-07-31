@@ -25,13 +25,13 @@
 #include <cstdint>
 
 // Constructor
-AMXInnerProductBF16::AMXInnerProduct() : amx_initialized(false)
+AMXInnerProductBF16::AMXInnerProductBF16() : amx_initialized(false)
 {
     reset_timers();
 }
 
 // Destructor
-AMXInnerProductBF16::~AMXInnerProduct()
+AMXInnerProductBF16::~AMXInnerProductBF16()
 {
     if (amx_initialized)
     {
@@ -42,11 +42,6 @@ AMXInnerProductBF16::~AMXInnerProduct()
 // Initialize AMX functionality
 bool AMXInnerProductBF16::initialize()
 {
-    if (!set_tiledata_use())
-    {
-        amx_initialized = false;
-        return false;
-    }
     amx_initialized = true;
     return true;
 }
@@ -72,10 +67,6 @@ void AMXInnerProductBF16::reset_timers()
     tile_setup_time = std::chrono::duration<double>::zero();
     actual_amx_time = std::chrono::duration<double>::zero();
     tile_load_time = std::chrono::duration<double>::zero();
-
-    compute_calls = 0;
-    chunking_calls = 0;
-    multiplication_calls = 0;
 }
 
 // Print comprehensive timing statistics
@@ -118,7 +109,7 @@ void AMXInnerProductBF16::init_tile_config(__tilecfg *tileinfo)
 }
 
 // Padding Vectors
-void AMXInnerProductBF16::padVectors(std::vector<std::vector<float>> &vectors)
+void AMXInnerProductBF16::padVectors(std::vector<std::vector<bfloat16_t>> &vectors)
 {
     // 1. Reserve outer vector capacity upfront
     int padded_size = (vectors.size() + 15) & ~15;
@@ -166,12 +157,11 @@ std::vector<std::vector<float>> AMXInnerProductBF16::compute_inner_products(std:
 
     auto end_total = std::chrono::high_resolution_clock::now();
     total_compute_time += end_total - start_total;
-    compute_calls++;
 
     return results_agg;
 }
 
-void AMXInnerProductBF16::main_multiply(std::vector<std::vector<bfloat16_t>> &results_agg, std::vector<std::vector<bfloat16_t>> &centroids, std::vector<std::vector<bfloat16_t>> &data)
+void AMXInnerProductBF16::main_multiply(std::vector<std::vector<float>> &results_agg, std::vector<std::vector<bfloat16_t>> &centroids, std::vector<std::vector<bfloat16_t>> &data)
 {
     int centroid_height = centroids.size() / MAX_SIZE;
     int data_height = data[0].size() / MAX_COLS;

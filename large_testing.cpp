@@ -10,6 +10,7 @@
 #include <vector>
 #include <cmath>
 #include <chrono>
+#include <cstring>
 
 typedef uint16_t bfloat16_t;
 
@@ -19,6 +20,24 @@ const int max_elements = 960000; // Maximum number of vectors to load
 const int num_centroids = 1600;
 const int rounds = 2;
 const std::string dataroot = "/mnt/ceph/district9/dataset/openai/openai_large_5m/"; // Set your data directory
+
+// Convert float32 to bfloat16
+static bfloat16_t float_to_bfloat16(float f) {
+    uint32_t bits;
+    std::memcpy(&bits, &f, sizeof(float));
+    
+    // Round to nearest even and truncate to bfloat16
+    uint32_t rounding_bias = 0x00007FFF + ((bits >> 16) & 1);
+    return static_cast<bfloat16_t>((bits + rounding_bias) >> 16);
+}
+
+// Convert bfloat16 to float32 for debugging/printing
+static float bfloat16_to_float(bfloat16_t bf16) {
+    uint32_t f32_bits = static_cast<uint32_t>(bf16) << 16;
+    float result;
+    std::memcpy(&result, &f32_bits, sizeof(float));
+    return result;
+}
 
 static void differenceAnalyzer(std::vector<std::vector<float>> scalar_results, std::vector<std::vector<float>> AMX_results)
 {
@@ -50,8 +69,8 @@ int main()
     auto init_start = std::chrono::high_resolution_clock::now();
 
     // Reading parquet files (0, 1 - 1m size)
-    std::vector<std::vector<float>> data;
-    data.reserve(max_elements);
+    std::vector<std::vector<float>> data_float;  // Temporary float storage
+    data_float.reserve(max_elements);
 
     int cnt = 0;
     size_t partition_size = 500000;
@@ -100,21 +119,21 @@ int main()
             auto val = std::static_pointer_cast<arrow::DoubleArray>(
                 std::static_pointer_cast<arrow::ListArray>(arr)->values());
 
-            for (int i = 0; i < partition_size && data.size() < max_elements; i++)
+            for (int i = 0; i < partition_size && data_float.size() < max_elements; i++)
             {
                 std::vector<float> vec(dim);
                 for (int j = 0; j < dim; j++)
                 {
                     vec[j] = (float)val->Value(i * dim + j);
                 }
-                data.push_back(vec);
+                data_float.push_back(vec);
             }
         }
         cnt++;
     }
 
-    // Normalize vectors
-    for (auto &emb : data)
+    // Normalize vectors (still in float)
+    for (auto &emb : data_float)
     {
         float mag = 0;
         for (int d = 0; d < dim; d++)
@@ -132,23 +151,53 @@ int main()
         }
     }
 
-    // Sample random centroids
+    // Sample random centroids (still in float)
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::vector<std::vector<float>> random_centroids;
-    std::sample(data.begin(), data.end(), std::back_inserter(random_centroids), num_centroids, gen);
+    std::vector<std::vector<float>> random_centroids_float;
+    std::sample(data_float.begin(), data_float.end(), std::back_inserter(random_centroids_float), num_centroids, gen);
 
-    std::cout << "Successfully loaded " << data.size() << " vectors of dimension " << data[0].size() << std::endl;
-    std::cout << "Sampled " << random_centroids.size() << " random centroids" << std::endl;
+    // Convert data and centroids to bfloat16
+    std::vector<std::vector<bfloat16_t>> data_bf16;
+    data_bf16.reserve(data_float.size());
+    for (const auto& vec_float : data_float) {
+        std::vector<bfloat16_t> vec_bf16(vec_float.size());
+        for (size_t i = 0; i < vec_float.size(); i++) {
+            vec_bf16[i] = float_to_bfloat16(vec_float[i]);
+        }
+        data_bf16.push_back(vec_bf16);
+    }
+
+    std::vector<std::vector<bfloat16_t>> random_centroids_bf16;
+    random_centroids_bf16.reserve(random_centroids_float.size());
+    for (const auto& vec_float : random_centroids_float) {
+        std::vector<bfloat16_t> vec_bf16(vec_float.size());
+        for (size_t i = 0; i < vec_float.size(); i++) {
+            vec_bf16[i] = float_to_bfloat16(vec_float[i]);
+        }
+        random_centroids_bf16.push_back(vec_bf16);
+    }
+
+    // Clean up float vectors to save memory
+    data_float.clear();
+    data_float.shrink_to_fit();
+    random_centroids_float.clear();
+    random_centroids_float.shrink_to_fit();
+
+    std::cout << "Successfully loaded " << data_bf16.size() << " vectors of dimension " << data_bf16[0].size() << std::endl;
+    std::cout << "Sampled " << random_centroids_bf16.size() << " random centroids" << std::endl;
+    std::cout << "All data converted to bfloat16 format" << std::endl;
 
     auto init_end = std::chrono::high_resolution_clock::now();
 
     auto init_duration = std::chrono::duration_cast<std::chrono::microseconds>(init_end - init_start);
     std::cout << "Preprocessing / Initialization took: " << init_duration.count() << " microseconds\n" << std::endl;
 
-    std::vector<std::vector<float>> centroids_copy = random_centroids;
-    std::vector<std::vector<float>> data_copy = data;
+    // Create copies for AMX (which might modify the input)
+    std::vector<std::vector<bfloat16_t>> centroids_copy = random_centroids_bf16;
+    std::vector<std::vector<bfloat16_t>> data_copy = data_bf16;
 
+    // AMX computation
     AMXInnerProductBF16 amx_calculator;
     long AMX_total_time = 0;
     std::vector<std::vector<float>> AMX_results;
@@ -166,9 +215,10 @@ int main()
         std::cout << "AMX Calculation function took: " << duration.count() << " microseconds" << std::endl;
     }
 
+    // Scalar computation
     auto scalar_start = std::chrono::high_resolution_clock::now();
     ScalarInnerProduct scalar_calculator;
-    std::vector<std::vector<float>> scalar_results = scalar_calculator.compute(random_centroids, data);
+    std::vector<std::vector<float>> scalar_results = scalar_calculator.compute(random_centroids_bf16, data_bf16);
     auto scalar_end = std::chrono::high_resolution_clock::now();
 
     // Print timing information
@@ -179,11 +229,14 @@ int main()
     std::cout << "Scalar runtime + Preprocessing took: " << scalar_duration.count() + init_duration.count() << " microseconds\n"
               << std::endl;
 
-//	amx_calculator.print_timing_stats();
+    // Uncomment to see detailed timing stats
+    // amx_calculator.print_timing_stats();
+    
     differenceAnalyzer(scalar_results, AMX_results);
 
-    //    amx_calculator.print_float_vectors(AMX_results);
-    //    scalar_calculator.printMatrix(scalar_results);
+    // Uncomment to print results for debugging
+    // amx_calculator.print_float_vectors(AMX_results);
+    // scalar_calculator.printMatrix(scalar_results);
 
     return 0;
 }

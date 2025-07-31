@@ -3,10 +3,22 @@
 #include <iostream>
 #include <stdexcept>
 #include <vector>
+#include <cstring>
+#include <cstdint>
+
+// Convert bfloat16 to float32
+float ScalarInnerProduct::bfloat16_to_float(bfloat16_t bf16) {
+    // bfloat16 is the upper 16 bits of a float32
+    // We need to shift it to the upper half and zero the lower half
+    uint32_t f32_bits = static_cast<uint32_t>(bf16) << 16;
+    float result;
+    std::memcpy(&result, &f32_bits, sizeof(float));
+    return result;
+}
 
 std::vector<std::vector<float>> ScalarInnerProduct::compute(
-    const std::vector<std::vector<float>>& centroids,
-    const std::vector<std::vector<float>>& data
+    const std::vector<std::vector<bfloat16_t>>& centroids,
+    const std::vector<std::vector<bfloat16_t>>& data
 ) {
     // Input validation
     if (centroids.empty() || data.empty()) {
@@ -44,7 +56,10 @@ std::vector<std::vector<float>> ScalarInnerProduct::compute(
         for (size_t j = 0; j < num_data; ++j) {
             float inner_product = 0.0f;
             for (size_t k = 0; k < centroid_dim; ++k) {
-                inner_product += centroids[i][k] * data[j][k];
+                // Convert bfloat16 values to float32 before multiplication
+                float centroid_val = bfloat16_to_float(centroids[i][k]);
+                float data_val = bfloat16_to_float(data[j][k]);
+                inner_product += centroid_val * data_val;
             }
             output[i][j] = inner_product;
         }
