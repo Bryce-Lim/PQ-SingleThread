@@ -177,6 +177,8 @@ void AMXInnerProductBF16::main_multiply(std::vector<std::vector<float>> &results
     auto end_conversion = std::chrono::high_resolution_clock::now();
     conversion_time += end_conversion - start_conversion;
 
+    std::cout << "Centroid formatting done!\n";
+
     // Tile init!
     __tilecfg tile_data = {0};
     init_tile_config(&tile_data);
@@ -196,16 +198,24 @@ void AMXInnerProductBF16::main_multiply(std::vector<std::vector<float>> &results
             auto end_conversion = std::chrono::high_resolution_clock::now();
             conversion_time += end_conversion - start_conversion;
 
+	    std::cout << "Data formatting done!\n";
+
             // Multiply using AMX
             for (int i = 0; i < centroid_height; ++i)
             {
                 _tile_zero(1);
+		std::cout << "Tile 1 loaded!\n";
                 _tile_loadd(2, centroid_chunk[centroid_id].data(), STRIDE);
+		std::cout << "Tile 2 (centroid) loaded!\n";
                 _tile_loadd(3, data_chunk.data(), STRIDE);
+		std::cout << "Tile 3 (data) loaded!\n";
 
                 _tile_dpbf16ps(1, 3, 2);
+		std::cout << "Tile 1 += Tile 3 * Tile 2 done!\n";
                 _tile_stored(1, results_chunk, STRIDE);
+		std::cout << "Stored in tile 1!\n";
 
+		std::cout << "AMX Multiplication done!\n";
                 // Merge results (same as before)
                 int col_offset = (id / data_height) * MAX_SIZE;
                 for (int row = 0; row < MAX_SIZE; ++row)
@@ -222,6 +232,7 @@ void AMXInnerProductBF16::main_multiply(std::vector<std::vector<float>> &results
                         _mm512_storeu_ps(&agg_row[col], result1);
                     }
                 }
+		std::cout << "Results merging done!\n";
                 centroid_id = (centroid_id + 1) % centroid_chunk.size();
             }
             chunk_index++;
@@ -266,6 +277,14 @@ bfloat16_t AMXInnerProductBF16::float_to_bfloat16(float f)
     // Round to nearest even and truncate to bfloat16
     uint32_t rounding_bias = 0x00007FFF + ((bits >> 16) & 1);
     return static_cast<bfloat16_t>((bits + rounding_bias) >> 16);
+}
+
+float AMXInnerProductBF16::bfloat16_to_float(bfloat16_t bf16)
+{
+    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
+    float result;
+    std::memcpy(&result, &bits, sizeof(float));
+    return result;
 }
 
 void AMXInnerProductBF16::print_bfloat16_vectors(const std::vector<std::vector<bfloat16_t>> &vecs)
