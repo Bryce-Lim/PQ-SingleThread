@@ -1,5 +1,9 @@
 // ScalarInnerProduct.cpp
 #include "ScalarInnerProduct.h"
+#include <iomanip>
+#include <limits>
+#include <string>
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -69,10 +73,94 @@ std::vector<std::vector<float>> ScalarInnerProduct::compute(
 }
 
 void ScalarInnerProduct::printMatrix(const std::vector<std::vector<float>>& matrix) {
+    if (matrix.empty()) {
+        std::cout << "Matrix is empty." << std::endl;
+        return;
+    }
+    
+    const size_t rows = matrix.size();
+    const size_t cols = matrix[0].size();
+    
+    // Print header with matrix dimensions
+    std::cout << "\n╔══════════════════════════════════════════════════════════╗" << std::endl;
+    std::cout << "║                    Inner Product Matrix                  ║" << std::endl;
+    std::cout << "║                 " << rows << " x " << cols << " (Centroids × Data)               ║" << std::endl;
+    std::cout << "╚══════════════════════════════════════════════════════════╝" << std::endl;
+    
+    // Set precision to 3 decimal places
+    std::cout << std::fixed << std::setprecision(3);
+    
+    // Print column headers (data vector indices)
+    std::cout << "   ";  // Space for row labels
+    for (size_t j = 0; j < cols; ++j) {
+        std::cout << std::setw(10) << ("D" + std::to_string(j));
+    }
+    std::cout << std::endl;
+    
+    // Print separator line
+    std::cout << "    ┌──";
+    for (size_t j = 0; j < cols; ++j) {
+        std::cout << "──────────";
+    }
+    std::cout << "┐" << std::endl;
+    
+    // Print matrix rows with row labels (centroid indices)
+    for (size_t i = 0; i < rows; ++i) {
+        std::cout << "C" << std::setw(2) << i << " │ ";
+        
+        for (size_t j = 0; j < cols; ++j) {
+            // Color coding for visualization (optional)
+            float val = matrix[i][j];
+            if (val > 0.800) {
+                std::cout << "\033[1;32m";  // Green for high similarity
+            } else if (val > 0.500) {
+                std::cout << "\033[1;33m";  // Yellow for medium similarity
+            } else if (val < 0.200) {
+                std::cout << "\033[1;31m";  // Red for low similarity
+            }
+            
+            std::cout << std::setw(9) << val << " ";
+            std::cout << "\033[0m";  // Reset color
+        }
+        std::cout << " │" << std::endl;
+    }
+    
+    // Print bottom border
+    std::cout << "    └──";
+    for (size_t j = 0; j < cols; ++j) {
+        std::cout << "──────────";
+    }
+    std::cout << "┘" << std::endl;
+    
+    // Print summary statistics
+    float min_val = std::numeric_limits<float>::max();
+    float max_val = std::numeric_limits<float>::lowest();
+    float sum = 0.0f;
+    size_t total_elements = 0;
+    
     for (const auto& row : matrix) {
         for (float val : row) {
-            std::cout << val << " ";
+            min_val = std::min(min_val, val);
+            max_val = std::max(max_val, val);
+            sum += val;
+            total_elements++;
         }
-        std::cout << std::endl;
     }
+    
+    float avg_val = sum / total_elements;
+    
+    std::cout << "\n📊 Matrix Statistics:" << std::endl;
+    std::cout << "   • Minimum value: " << std::setw(8) << min_val << std::endl;
+    std::cout << "   • Maximum value: " << std::setw(8) << max_val << std::endl;
+    std::cout << "   • Average value: " << std::setw(8) << avg_val << std::endl;
+    std::cout << "   • Range:         " << std::setw(8) << (max_val - min_val) << std::endl;
+    
+    // Legend for color coding
+    std::cout << "\n🎨 Color Legend:" << std::endl;
+    std::cout << "   \033[1;32m■\033[0m Green:  High similarity (> 0.800)" << std::endl;
+    std::cout << "   \033[1;33m■\033[0m Yellow: Medium similarity (0.500 - 0.800)" << std::endl;
+    std::cout << "   \033[1;31m■\033[0m Red:    Low similarity (< 0.200)" << std::endl;
+    std::cout << "   ■ White:  Normal similarity" << std::endl;
+    
+    std::cout << std::endl;
 }

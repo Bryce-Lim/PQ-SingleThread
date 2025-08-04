@@ -57,11 +57,11 @@ private:
 
     // Computation and merging functions
     void main_multiply(std::vector<std::vector<float>> &results_agg, std::vector<std::vector<bfloat16_t>> &centroids, std::vector<std::vector<bfloat16_t>> &data);    
-    
+
+public:    
     // Printing methods
     void print_bfloat16_vectors(const std::vector<std::vector<bfloat16_t>> &vecs);
 
-public:
     // Constructor and Destructor
     AMXInnerProductBF16();
     ~AMXInnerProductBF16();

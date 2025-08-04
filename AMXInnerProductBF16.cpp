@@ -42,6 +42,12 @@ AMXInnerProductBF16::~AMXInnerProductBF16()
 // Initialize AMX functionality
 bool AMXInnerProductBF16::initialize()
 {
+    if (syscall(SYS_arch_prctl, ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA))
+    {
+	amx_initialized = false;
+        return false;
+    }
+    
     amx_initialized = true;
     return true;
 }
@@ -177,8 +183,6 @@ void AMXInnerProductBF16::main_multiply(std::vector<std::vector<float>> &results
     auto end_conversion = std::chrono::high_resolution_clock::now();
     conversion_time += end_conversion - start_conversion;
 
-    std::cout << "Centroid formatting done!\n";
-
     // Tile init!
     __tilecfg tile_data = {0};
     init_tile_config(&tile_data);
@@ -198,41 +202,63 @@ void AMXInnerProductBF16::main_multiply(std::vector<std::vector<float>> &results
             auto end_conversion = std::chrono::high_resolution_clock::now();
             conversion_time += end_conversion - start_conversion;
 
-	    std::cout << "Data formatting done!\n";
-
             // Multiply using AMX
             for (int i = 0; i < centroid_height; ++i)
             {
                 _tile_zero(1);
-		std::cout << "Tile 1 loaded!\n";
                 _tile_loadd(2, centroid_chunk[centroid_id].data(), STRIDE);
-		std::cout << "Tile 2 (centroid) loaded!\n";
                 _tile_loadd(3, data_chunk.data(), STRIDE);
-		std::cout << "Tile 3 (data) loaded!\n";
 
                 _tile_dpbf16ps(1, 3, 2);
-		std::cout << "Tile 1 += Tile 3 * Tile 2 done!\n";
                 _tile_stored(1, results_chunk, STRIDE);
-		std::cout << "Stored in tile 1!\n";
 
-		std::cout << "AMX Multiplication done!\n";
-                // Merge results (same as before)
+                // CORRECTED: Merge results with untransposition using AVX-512 gather
+                // The AMX result is transposed (data x centroids), we need (centroids x data)
                 int col_offset = (id / data_height) * MAX_SIZE;
-                for (int row = 0; row < MAX_SIZE; ++row)
+                
+                // Process in chunks of 16 for AVX-512 efficiency
+                for (int centroid_row = 0; centroid_row < MAX_SIZE; ++centroid_row)
                 {
-                    float *chunk_row = &results_chunk[row * MAX_SIZE];
-                    float *agg_row = &results_agg[i * MAX_SIZE + row][col_offset];
-
-                    int col = 0;
-                    for (; col <= MAX_SIZE - 16; col += 16)
+                    int result_row_idx = i * MAX_SIZE + centroid_row;
+                    float* agg_row = &results_agg[result_row_idx][col_offset];
+                    
+                    // Process 16 elements at a time using AVX-512
+                    int data_col = 0;
+                    for (; data_col <= MAX_SIZE - 16; data_col += 16)
                     {
-                        __m512 chunk_vec1 = _mm512_loadu_ps(&chunk_row[col]);
-                        __m512 agg_vec1 = _mm512_loadu_ps(&agg_row[col]);
-                        __m512 result1 = _mm512_add_ps(agg_vec1, chunk_vec1);
-                        _mm512_storeu_ps(&agg_row[col], result1);
+                        // Create index vector for gather operation
+                        // We want to load results_chunk[data_col * MAX_SIZE + centroid_row] for data_col in [0,15]
+                        __m512i indices = _mm512_set_epi32(
+                            (data_col + 15) * MAX_SIZE + centroid_row,
+                            (data_col + 14) * MAX_SIZE + centroid_row,
+                            (data_col + 13) * MAX_SIZE + centroid_row,
+                            (data_col + 12) * MAX_SIZE + centroid_row,
+                            (data_col + 11) * MAX_SIZE + centroid_row,
+                            (data_col + 10) * MAX_SIZE + centroid_row,
+                            (data_col + 9) * MAX_SIZE + centroid_row,
+                            (data_col + 8) * MAX_SIZE + centroid_row,
+                            (data_col + 7) * MAX_SIZE + centroid_row,
+                            (data_col + 6) * MAX_SIZE + centroid_row,
+                            (data_col + 5) * MAX_SIZE + centroid_row,
+                            (data_col + 4) * MAX_SIZE + centroid_row,
+                            (data_col + 3) * MAX_SIZE + centroid_row,
+                            (data_col + 2) * MAX_SIZE + centroid_row,
+                            (data_col + 1) * MAX_SIZE + centroid_row,
+                            data_col * MAX_SIZE + centroid_row
+                        );
+                        
+                        // Use gather to load transposed elements efficiently
+                        __m512 transposed_values = _mm512_i32gather_ps(indices, results_chunk, sizeof(float));
+                        
+                        // Load existing values from aggregation matrix
+                        __m512 agg_values = _mm512_loadu_ps(&agg_row[data_col]);
+                        
+                        // Add and store back
+                        __m512 result = _mm512_add_ps(agg_values, transposed_values);
+                        _mm512_storeu_ps(&agg_row[data_col], result);
                     }
                 }
-		std::cout << "Results merging done!\n";
+
                 centroid_id = (centroid_id + 1) % centroid_chunk.size();
             }
             chunk_index++;

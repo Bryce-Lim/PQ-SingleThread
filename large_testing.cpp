@@ -15,10 +15,10 @@
 typedef uint16_t bfloat16_t;
 
 // Define these constants based on your data
-const int dim = 32;             // Adjust to your embedding dimension
-const int max_elements = 96; // Maximum number of vectors to load
+const int dim = 128;             // Adjust to your embedding dimension
+const int max_elements = 9600; // Maximum number of vectors to load
 const int num_centroids = 16;
-const int rounds = 2;
+const int rounds = 1;
 const std::string dataroot = "/mnt/ceph/district9/dataset/openai/openai_large_5m/"; // Set your data directory
 
 // Convert float32 to bfloat16
@@ -235,7 +235,7 @@ int main()
     differenceAnalyzer(scalar_results, AMX_results);
 
     // Uncomment to print results for debugging
-    // amx_calculator.print_float_vectors(AMX_results);
+    // scalar_calculator.printMatrix(AMX_results);
     // scalar_calculator.printMatrix(scalar_results);
 
     return 0;
