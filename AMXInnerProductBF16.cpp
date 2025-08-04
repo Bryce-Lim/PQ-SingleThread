@@ -175,7 +175,7 @@ void AMXInnerProductBF16::main_multiply(std::vector<std::vector<float>> &results
     auto start_conversion = std::chrono::high_resolution_clock::now();
     centroid_format(centroids, centroid_chunk);
     auto end_conversion = std::chrono::high_resolution_clock::now();
-    conversion_time += end_conversion - start_conversion;
+//    conversion_time += end_conversion - start_conversion;
 
     // Tile init!
     __tilecfg tile_data = {0};
@@ -209,12 +209,10 @@ void AMXInnerProductBF16::main_multiply(std::vector<std::vector<float>> &results
                 auto end_AMX = std::chrono::high_resolution_clock::now();
                 actual_amx_time += end_AMX - start_AMX;
 
-                // CORRECTED: Merge results with untransposition using AVX-512 gather
                 // The AMX result is transposed (data x centroids), we need (centroids x data)
                 auto start_merge = std::chrono::high_resolution_clock::now();
                 int col_offset = (id / data_height) * MAX_SIZE;
 
-                // Process in chunks of 16 for AVX-512 efficiency
                 for (int centroid_row = 0; centroid_row < MAX_SIZE; ++centroid_row)
                 {
                     int result_row_idx = i * MAX_SIZE + centroid_row;
@@ -245,13 +243,9 @@ void AMXInnerProductBF16::main_multiply(std::vector<std::vector<float>> &results
                             data_col * MAX_SIZE + centroid_row
                         );
 
-                        // Use gather to load transposed elements efficiently
                         __m512 transposed_values = _mm512_i32gather_ps(indices, results_chunk, sizeof(float));
-
-                        // Load existing values from aggregation matrix
                         __m512 agg_values = _mm512_loadu_ps(&agg_row[data_col]);
 
-                        // Add and store back
                         __m512 result = _mm512_add_ps(agg_values, transposed_values);
                         _mm512_storeu_ps(&agg_row[data_col], result);
                     }
