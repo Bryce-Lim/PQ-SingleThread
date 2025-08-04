@@ -38,10 +38,8 @@ private:
     std::chrono::duration<double> padding_time;
     std::chrono::duration<double> conversion_time;
     std::chrono::duration<double> chunking_time;
-    std::chrono::duration<double> multiplication_time;
-    std::chrono::duration<double> tile_setup_time;
+    std::chrono::duration<double> merging_time;
     std::chrono::duration<double> actual_amx_time;
-    std::chrono::duration<double> tile_load_time;
 
     // Initialization methods
     static void init_tile_config(__tilecfg *tileinfo);
@@ -79,10 +77,8 @@ public:
     double get_padding_time_ms() const;
     double get_conversion_time_ms() const;
     double get_chunking_time_ms() const;
-    double get_multiplication_time_ms() const;
-    double get_tile_setup_time_ms() const;
+    double get_merging_time_ms() const;
     double get_actual_amx_time_ms() const;
-    double get_tile_load_time_ms() const;
 
     // Check if AMX is properly initialized
     bool is_initialized() const { return amx_initialized; }

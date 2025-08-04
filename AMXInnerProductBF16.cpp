@@ -44,10 +44,10 @@ bool AMXInnerProductBF16::initialize()
 {
     if (syscall(SYS_arch_prctl, ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA))
     {
-	amx_initialized = false;
+        amx_initialized = false;
         return false;
     }
-    
+
     amx_initialized = true;
     return true;
 }
@@ -57,10 +57,8 @@ double AMXInnerProductBF16::get_total_compute_time_ms() const { return total_com
 double AMXInnerProductBF16::get_padding_time_ms() const { return padding_time.count() * 1000.0; }
 double AMXInnerProductBF16::get_conversion_time_ms() const { return conversion_time.count() * 1000.0; }
 double AMXInnerProductBF16::get_chunking_time_ms() const { return chunking_time.count() * 1000.0; }
-double AMXInnerProductBF16::get_multiplication_time_ms() const { return multiplication_time.count() * 1000.0; }
-double AMXInnerProductBF16::get_tile_setup_time_ms() const { return tile_setup_time.count() * 1000.0; }
+double AMXInnerProductBF16::get_merging_time_ms() const { return merging_time.count() * 1000.0; }
 double AMXInnerProductBF16::get_actual_amx_time_ms() const { return actual_amx_time.count() * 1000.0; }
-double AMXInnerProductBF16::get_tile_load_time_ms() const { return tile_load_time.count() * 1000.0; }
 
 // Reset all timing counters
 void AMXInnerProductBF16::reset_timers()
@@ -69,10 +67,8 @@ void AMXInnerProductBF16::reset_timers()
     padding_time = std::chrono::duration<double>::zero();
     conversion_time = std::chrono::duration<double>::zero();
     chunking_time = std::chrono::duration<double>::zero();
-    multiplication_time = std::chrono::duration<double>::zero();
-    tile_setup_time = std::chrono::duration<double>::zero();
+    merging_time = std::chrono::duration<double>::zero();
     actual_amx_time = std::chrono::duration<double>::zero();
-    tile_load_time = std::chrono::duration<double>::zero();
 }
 
 // Print comprehensive timing statistics
@@ -84,11 +80,9 @@ void AMXInnerProductBF16::print_timing_stats() const
     std::cout << " Total compute time:        " << std::setw(8) << get_total_compute_time_ms() << " ms\n";
     std::cout << " - Padding time:            " << std::setw(8) << get_padding_time_ms() << " ms\n";
     std::cout << " - Chunking time:           " << std::setw(8) << get_chunking_time_ms() << " ms\n";
-    std::cout << "   - Multiplication time:   " << std::setw(8) << get_multiplication_time_ms() << " ms\n";
     std::cout << "     - Conversion time:     " << std::setw(8) << get_conversion_time_ms() << " ms\n";
-    std::cout << "     - Result merging time: " << std::setw(8) << get_tile_setup_time_ms() << " ms\n";
+    std::cout << "     - Result merging time: " << std::setw(8) << get_merging_time_ms() << " ms\n";
     std::cout << "     - Actual AMX time:     " << std::setw(8) << get_actual_amx_time_ms() << " ms\n";
-    std::cout << "     - Tile load time:      " << std::setw(8) << get_tile_load_time_ms() << " ms\n";
 
     std::cout << "===========================================\n\n";
 }
@@ -205,23 +199,27 @@ void AMXInnerProductBF16::main_multiply(std::vector<std::vector<float>> &results
             // Multiply using AMX
             for (int i = 0; i < centroid_height; ++i)
             {
+                auto start_AMX = std::chrono::high_resolution_clock::now();
                 _tile_zero(1);
                 _tile_loadd(2, centroid_chunk[centroid_id].data(), STRIDE);
                 _tile_loadd(3, data_chunk.data(), STRIDE);
 
                 _tile_dpbf16ps(1, 3, 2);
                 _tile_stored(1, results_chunk, STRIDE);
+                auto end_AMX = std::chrono::high_resolution_clock::now();
+                actual_amx_time += end_AMX - start_AMX;
 
                 // CORRECTED: Merge results with untransposition using AVX-512 gather
                 // The AMX result is transposed (data x centroids), we need (centroids x data)
+                auto start_merge = std::chrono::high_resolution_clock::now();
                 int col_offset = (id / data_height) * MAX_SIZE;
-                
+
                 // Process in chunks of 16 for AVX-512 efficiency
                 for (int centroid_row = 0; centroid_row < MAX_SIZE; ++centroid_row)
                 {
                     int result_row_idx = i * MAX_SIZE + centroid_row;
                     float* agg_row = &results_agg[result_row_idx][col_offset];
-                    
+
                     // Process 16 elements at a time using AVX-512
                     int data_col = 0;
                     for (; data_col <= MAX_SIZE - 16; data_col += 16)
@@ -246,25 +244,29 @@ void AMXInnerProductBF16::main_multiply(std::vector<std::vector<float>> &results
                             (data_col + 1) * MAX_SIZE + centroid_row,
                             data_col * MAX_SIZE + centroid_row
                         );
-                        
+
                         // Use gather to load transposed elements efficiently
                         __m512 transposed_values = _mm512_i32gather_ps(indices, results_chunk, sizeof(float));
-                        
+
                         // Load existing values from aggregation matrix
                         __m512 agg_values = _mm512_loadu_ps(&agg_row[data_col]);
-                        
+
                         // Add and store back
                         __m512 result = _mm512_add_ps(agg_values, transposed_values);
                         _mm512_storeu_ps(&agg_row[data_col], result);
                     }
                 }
 
+                auto end_merge = std::chrono::high_resolution_clock::now();
+                merging_time += end_merge - start_merge;
                 centroid_id = (centroid_id + 1) % centroid_chunk.size();
             }
             chunk_index++;
             id++;
         }
     }
+    auto end_chunking = std::chrono::high_resolution_clock::now();
+    chunking_time += end_chunking - start_chunking;
 }
 
 void AMXInnerProductBF16::centroid_format(std::vector<std::vector<bfloat16_t>> &centroids, std::vector<std::vector<bfloat16_t>> &centroid_chunk) {
