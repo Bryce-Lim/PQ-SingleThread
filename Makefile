@@ -1,4 +1,4 @@
-# Makefile for AMX Inner Product with Arrow/Parquet support
+# Makefile for AMX Inner Product with Arrow/Parquet support and Hnswlib comparison
 CXX = g++
 CXXFLAGS = -flax-vector-conversions -fopenmp -std=c++17 -O2 -march=native -fno-strict-aliasing -mavx512bf16
 
@@ -22,11 +22,14 @@ ifeq ($(PARQUET_LIBS),)
     PARQUET_LIBS = -lparquet
 endif
 
-INCLUDES = $(ARROW_INCLUDE) $(PARQUET_INCLUDE)
+# Add hnswlib include path (adjust this to your hnswlib installation)
+HNSWLIB_INCLUDE = -I./hnswlib
+
+INCLUDES = $(ARROW_INCLUDE) $(PARQUET_INCLUDE) $(HNSWLIB_INCLUDE)
 ALL_LIBS = $(ARROW_LIBS) $(PARQUET_LIBS)
 
 # Object files
-OBJECTS = large_testing.o AMXInnerProductBF16.o ScalarInnerProduct.o
+OBJECTS = large_testing.o AMXInnerProductBF16.o ScalarInnerProduct.o HnswlibInnerProduct.o
 
 # Targets
 all: large_testing
@@ -37,7 +40,10 @@ AMXInnerProductBF16.o: AMXInnerProductBF16.cpp AMXInnerProductBF16.h
 ScalarInnerProduct.o: ScalarInnerProduct.cpp ScalarInnerProduct.h
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c ScalarInnerProduct.cpp -o ScalarInnerProduct.o
 
-large_testing.o: large_testing.cpp AMXInnerProductBF16.h ScalarInnerProduct.h
+HnswlibInnerProduct.o: HnswlibInnerProduct.cpp HnswlibInnerProduct.h
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c HnswlibInnerProduct.cpp -o HnswlibInnerProduct.o
+
+large_testing.o: large_testing.cpp AMXInnerProductBF16.h ScalarInnerProduct.h HnswlibInnerProduct.h
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c large_testing.cpp -o large_testing.o
 
 large_testing: $(OBJECTS)

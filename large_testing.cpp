@@ -1,5 +1,6 @@
 #include "AMXInnerProductBF16.h"
 #include "ScalarInnerProduct.h"
+#include "HnswlibInnerProduct.h"
 #include "arrow/api.h"
 #include "arrow/io/api.h"
 #include "arrow/ipc/api.h"
@@ -7,6 +8,7 @@
 #include <algorithm>
 #include <random>
 #include <iostream>
+#include <iomanip>
 #include <vector>
 #include <cmath>
 #include <chrono>
@@ -39,17 +41,19 @@ static float bfloat16_to_float(bfloat16_t bf16) {
     return result;
 }
 
-static void differenceAnalyzer(std::vector<std::vector<float>> scalar_results, std::vector<std::vector<float>> AMX_results)
+static void differenceAnalyzer(const std::vector<std::vector<float>>& scalar_results, 
+                              const std::vector<std::vector<float>>& comparison_results, 
+                              const std::string& comparison_name)
 {
     std::vector<std::vector<float>> subtract_results(scalar_results.size(), std::vector<float>(scalar_results[0].size()));
     float average_error = 0.0f;
     float max_error = 0.0f;
 
-    for (int i = 0; i < scalar_results.size(); i++)
+    for (size_t i = 0; i < scalar_results.size(); i++)
     {
-        for (int j = 0; j < scalar_results[0].size(); j++)
+        for (size_t j = 0; j < scalar_results[0].size(); j++)
         {
-            subtract_results[i][j] = std::fabs(AMX_results[i][j] - scalar_results[i][j]);
+            subtract_results[i][j] = std::fabs(comparison_results[i][j] - scalar_results[i][j]);
             average_error += subtract_results[i][j];
             if (subtract_results[i][j] > max_error)
             {
@@ -59,8 +63,8 @@ static void differenceAnalyzer(std::vector<std::vector<float>> scalar_results, s
     }
 
     average_error = average_error / (scalar_results.size() * scalar_results[0].size());
-    std::cout << "Average difference between Scalar and AMX -- " << average_error << std::endl;
-    std::cout << "Largest difference between Scalar and AMX -- " << max_error << std::endl;
+    std::cout << "Average difference between Scalar and " << comparison_name << " -- " << average_error << std::endl;
+    std::cout << "Largest difference between Scalar and " << comparison_name << " -- " << max_error << std::endl;
 }
 
 int main()
@@ -197,7 +201,34 @@ int main()
     std::vector<std::vector<bfloat16_t>> centroids_copy = random_centroids_bf16;
     std::vector<std::vector<bfloat16_t>> data_copy = data_bf16;
 
-    // AMX computation
+    // ===== SCALAR COMPUTATION =====
+    std::cout << "=== Running Scalar Computation ===" << std::endl;
+    auto scalar_start = std::chrono::high_resolution_clock::now();
+    ScalarInnerProduct scalar_calculator;
+    std::vector<std::vector<float>> scalar_results = scalar_calculator.compute(random_centroids_bf16, data_bf16);
+    auto scalar_end = std::chrono::high_resolution_clock::now();
+    auto scalar_duration = std::chrono::duration_cast<std::chrono::microseconds>(scalar_end - scalar_start);
+    std::cout << "Scalar Calculation function took: " << scalar_duration.count() << " microseconds" << std::endl;
+
+    // ===== HNSWLIB COMPUTATION =====
+    std::cout << "\n=== Running Hnswlib-optimized Computation ===" << std::endl;
+    HnswlibInnerProduct hnswlib_calculator;
+    long hnswlib_total_time = 0;
+    std::vector<std::vector<float>> hnswlib_results;
+    
+    for (int i = 0; i < rounds; i++)
+    {
+        auto start = std::chrono::high_resolution_clock::now();
+        hnswlib_calculator.reset_timers();
+        hnswlib_results = hnswlib_calculator.compute(random_centroids_bf16, data_bf16);
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+        hnswlib_total_time += duration.count();
+        std::cout << "Hnswlib Calculation function took: " << duration.count() << " microseconds" << std::endl;
+    }
+
+    // ===== AMX COMPUTATION =====
+    std::cout << "\n=== Running AMX Computation ===" << std::endl;
     AMXInnerProductBF16 amx_calculator;
     long AMX_total_time = 0;
     std::vector<std::vector<float>> AMX_results;
@@ -215,27 +246,68 @@ int main()
         std::cout << "AMX Calculation function took: " << duration.count() << " microseconds" << std::endl;
     }
 
-    // Scalar computation
-    auto scalar_start = std::chrono::high_resolution_clock::now();
-    ScalarInnerProduct scalar_calculator;
-    std::vector<std::vector<float>> scalar_results = scalar_calculator.compute(random_centroids_bf16, data_bf16);
-    auto scalar_end = std::chrono::high_resolution_clock::now();
+    // ===== PERFORMANCE COMPARISON =====
+    std::cout << "\n" << std::string(60, '=') << std::endl;
+    std::cout << "                PERFORMANCE COMPARISON" << std::endl;
+    std::cout << std::string(60, '=') << std::endl;
 
-    // Print timing information
-    std::cout << "AVERAGE AMX Calculation function took: " << AMX_total_time / rounds << " microseconds" << std::endl;
+    std::cout << "Scalar runtime:                    " << std::setw(10) << scalar_duration.count() << " μs" << std::endl;
+    std::cout << "Hnswlib AVERAGE runtime:          " << std::setw(10) << hnswlib_total_time / rounds << " μs" << std::endl;
+    std::cout << "AMX AVERAGE runtime:              " << std::setw(10) << AMX_total_time / rounds << " μs" << std::endl;
 
-    auto scalar_duration = std::chrono::duration_cast<std::chrono::microseconds>(scalar_end - scalar_start);
-    std::cout << "Scalar Calculation function took: " << scalar_duration.count() << " microseconds" << std::endl;
-    std::cout << "Scalar runtime + Preprocessing took: " << scalar_duration.count() + init_duration.count() << " microseconds\n"
-              << std::endl;
+    // Calculate speedups
+    double hnswlib_speedup = static_cast<double>(scalar_duration.count()) / (hnswlib_total_time / rounds);
+    double amx_speedup = static_cast<double>(scalar_duration.count()) / (AMX_total_time / rounds);
+    double hnswlib_vs_amx = static_cast<double>(hnswlib_total_time / rounds) / (AMX_total_time / rounds);
 
-    // Uncomment to see detailed timing stats
+    std::cout << std::fixed << std::setprecision(2);
+    std::cout << "\nSpeedup vs Scalar:" << std::endl;
+    std::cout << "  Hnswlib:                         " << std::setw(10) << hnswlib_speedup << "x" << std::endl;
+    std::cout << "  AMX:                             " << std::setw(10) << amx_speedup << "x" << std::endl;
+    std::cout << "\nHnswlib vs AMX ratio:             " << std::setw(10) << hnswlib_vs_amx << "x" << std::endl;
+
+    if (hnswlib_vs_amx > 1.0) {
+        std::cout << "  (AMX is " << hnswlib_vs_amx << "x faster than Hnswlib)" << std::endl;
+    } else {
+        std::cout << "  (Hnswlib is " << (1.0/hnswlib_vs_amx) << "x faster than AMX)" << std::endl;
+    }
+
+    std::cout << std::string(60, '=') << std::endl;
+
+    // Print detailed timing stats
+    std::cout << "\n=== DETAILED TIMING BREAKDOWN ===" << std::endl;
+    hnswlib_calculator.print_timing_stats();
     amx_calculator.print_timing_stats();
+
+    // ===== ACCURACY COMPARISON =====
+    std::cout << "\n=== ACCURACY COMPARISON ===" << std::endl;
+    differenceAnalyzer(scalar_results, hnswlib_results, "Hnswlib");
+    differenceAnalyzer(scalar_results, AMX_results, "AMX");
+
+    // Additional metrics
+    std::cout << "\n=== PROBLEM SIZE METRICS ===" << std::endl;
+    std::cout << "Matrix size:                       " << random_centroids_bf16.size() << " x " << data_bf16.size() << std::endl;
+    std::cout << "Total computations:                " << random_centroids_bf16.size() * data_bf16.size() << std::endl;
+    std::cout << "Vector dimension:                  " << data_bf16[0].size() << std::endl;
+    std::cout << "Total multiply-adds:               " << random_centroids_bf16.size() * data_bf16.size() * data_bf16[0].size() << std::endl;
+
+    // Throughput calculations
+    long long total_ops = static_cast<long long>(random_centroids_bf16.size()) * data_bf16.size() * data_bf16[0].size();
     
-    differenceAnalyzer(scalar_results, AMX_results);
+    std::cout << "\n=== THROUGHPUT (GFLOPS) ===" << std::endl;
+    std::cout << std::fixed << std::setprecision(3);
+    
+    double scalar_gflops = (total_ops * 2.0) / (scalar_duration.count() * 1e-6) / 1e9;  // *2 for multiply-add
+    double hnswlib_gflops = (total_ops * 2.0) / ((hnswlib_total_time / rounds) * 1e-6) / 1e9;
+    double amx_gflops = (total_ops * 2.0) / ((AMX_total_time / rounds) * 1e-6) / 1e9;
+    
+    std::cout << "Scalar throughput:                 " << std::setw(10) << scalar_gflops << " GFLOPS" << std::endl;
+    std::cout << "Hnswlib throughput:                " << std::setw(10) << hnswlib_gflops << " GFLOPS" << std::endl;
+    std::cout << "AMX throughput:                    " << std::setw(10) << amx_gflops << " GFLOPS" << std::endl;
 
     // Uncomment to print results for debugging
-    // scalar_calculator.printMatrix(AMX_results);
+    // std::cout << "\n=== SAMPLE RESULTS ===" << std::endl;
+    // hnswlib_calculator.printMatrix(hnswlib_results);
     // scalar_calculator.printMatrix(scalar_results);
 
     return 0;
