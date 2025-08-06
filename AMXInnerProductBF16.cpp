@@ -77,12 +77,12 @@ void AMXInnerProductBF16::print_timing_stats() const
     std::cout << "\n=== AMX Inner Product Timing Statistics ===\n";
     std::cout << std::fixed << std::setprecision(3);
 
-    std::cout << " Total compute time:          " << std::setw(8) << get_total_compute_time_ms() << " ms\n";
-    std::cout << " - Padding time:              " << std::setw(8) << get_padding_time_ms() << " ms\n";
-    std::cout << " - Chunking time:             " << std::setw(8) << get_chunking_time_ms() << " ms\n";
-    std::cout << "     - Tile loading time:     " << std::setw(8) << get_conversion_time_ms() << " ms\n";
-    std::cout << "     - Result merging time:   " << std::setw(8) << get_merging_time_ms() << " ms\n";
-    std::cout << "     - Actual AMX time:       " << std::setw(8) << get_actual_amx_time_ms() << " ms\n";
+    std::cout << " Total compute time:           " << std::setw(8) << get_total_compute_time_ms() << " ms\n";
+    std::cout << " - Padding time:               " << std::setw(8) << get_padding_time_ms() << " ms\n";
+    std::cout << " - Chunking time:              " << std::setw(8) << get_chunking_time_ms() << " ms\n";
+    std::cout << "     - Tile formatting time:   " << std::setw(8) << get_conversion_time_ms() << " ms\n";
+    std::cout << "     - Result merging time:    " << std::setw(8) << get_merging_time_ms() << " ms\n";
+    std::cout << "     - Actual AMX time:        " << std::setw(8) << get_actual_amx_time_ms() << " ms\n";
 
     std::cout << "===========================================\n\n";
 }
@@ -288,55 +288,27 @@ void AMXInnerProductBF16::main_multiply(std::vector<std::vector<float>> &results
 
 void AMXInnerProductBF16::centroid_format(std::vector<std::vector<bfloat16_t>> &centroids, std::vector<std::vector<bfloat16_t>> &centroid_chunk) 
 {
-    // Clear any existing chunks
-    centroid_chunk.clear();
-    
     // Calculate the number of chunks needed
     int centroid_height = (centroids.size() + MAX_SIZE - 1) / MAX_SIZE;
     int data_height = (centroids[0].size() + MAX_COLS - 1) / MAX_COLS;
     
     // Reserve space for all chunks
-    centroid_chunk.reserve(centroid_height * data_height);
-    
+    centroid_chunk.reserve(centroid_height * data_height);    
     std::vector<bfloat16_t> chunk(MAX_COLS * MAX_SIZE, 0);  // Initialize with zeros
     
-    for (int centroid_offset = 0; centroid_offset < centroids.size(); centroid_offset += MAX_SIZE)
-    {
-        for (int d_offset = 0; d_offset < centroids[0].size(); d_offset += MAX_COLS)
-        {
-            // Clear the chunk
-            std::fill(chunk.begin(), chunk.end(), 0);
-            
+    for (int centroid_offset = 0; centroid_offset < centroids.size() / MAX_SIZE; centroid_offset++) {
+        for (int d_offset = 0; d_offset < centroids[0].size() / MAX_COLS; d_offset++) {
             int k = 0;
-            // Process pairs of columns for BF16 packing
-            for (int i = 0; i < MAX_COLS; i += 2)
-            {
-                for (int j = 0; j < MAX_SIZE; j++)
-                {
-                    // Calculate actual indices
-                    int centroid_idx = centroid_offset + j;
-                    int dim_idx1 = d_offset + i;
-                    int dim_idx2 = d_offset + i + 1;
-                    
-                    // Check bounds and copy data
-                    if (centroid_idx < centroids.size())
-                    {
-                        if (dim_idx1 < centroids[centroid_idx].size())
-                        {
-                            chunk[k] = centroids[centroid_idx][dim_idx1];
-                        }
-                        k++;
-                        
-                        if (dim_idx2 < centroids[centroid_idx].size())
-                        {
-                            chunk[k] = centroids[centroid_idx][dim_idx2];
-                        }
-                        k++;
-                    }
-                    else
-                    {
-                        k += 2;  // Skip padding entries
-                    }
+            // 2-wide processing for AMX tile formatting
+            for (int i = 0; i < MAX_COLS; i += 2) {
+                for (int j = 0; j < MAX_SIZE; j++) {
+                    // Index calculations
+                    int centroid_idx = centroid_offset * MAX_SIZE + j;
+                    int dim_idx1 = d_offset * MAX_COLS + i;
+                    int dim_idx2 = d_offset * MAX_COLS + i + 1;
+
+                    chunk[k++] = centroids[centroid_idx][dim_idx1];
+                    chunk[k++] = centroids[centroid_idx][dim_idx2];
                 }
             }
             centroid_chunk.push_back(chunk);
