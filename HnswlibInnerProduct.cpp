@@ -111,30 +111,9 @@ std::vector<std::vector<float>> HnswlibInnerProduct::compute(
         throw std::invalid_argument("Input vectors cannot be empty");
     }
     
-    // Check that all centroids have the same dimension
-    size_t centroid_dim = centroids[0].size();
-    for (const auto& centroid : centroids) {
-        if (centroid.size() != centroid_dim) {
-            throw std::invalid_argument("All centroids must have the same dimension");
-        }
-    }
-    
-    // Check that all data vectors have the same dimension
-    size_t data_dim = data[0].size();
-    for (const auto& vec : data) {
-        if (vec.size() != data_dim) {
-            throw std::invalid_argument("All data vectors must have the same dimension");
-        }
-    }
-    
-    // Check dimension compatibility
-    if (centroid_dim != data_dim) {
-        throw std::invalid_argument("Centroids and data vectors must have the same dimension");
-    }
-    
     size_t num_centroids = centroids.size();
     size_t num_data = data.size();
-    size_t dim = centroid_dim;
+    size_t dim = centroids[0].size();
     
     auto start_conversion = std::chrono::high_resolution_clock::now();
     

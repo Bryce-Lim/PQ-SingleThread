@@ -77,12 +77,12 @@ void AMXInnerProductBF16::print_timing_stats() const
     std::cout << "\n=== AMX Inner Product Timing Statistics ===\n";
     std::cout << std::fixed << std::setprecision(3);
 
-    std::cout << " Total compute time:        " << std::setw(8) << get_total_compute_time_ms() << " ms\n";
-    std::cout << " - Padding time:            " << std::setw(8) << get_padding_time_ms() << " ms\n";
-    std::cout << " - Chunking time:           " << std::setw(8) << get_chunking_time_ms() << " ms\n";
-    std::cout << "     - Conversion time:     " << std::setw(8) << get_conversion_time_ms() << " ms\n";
-    std::cout << "     - Result merging time: " << std::setw(8) << get_merging_time_ms() << " ms\n";
-    std::cout << "     - Actual AMX time:     " << std::setw(8) << get_actual_amx_time_ms() << " ms\n";
+    std::cout << " Total compute time:          " << std::setw(8) << get_total_compute_time_ms() << " ms\n";
+    std::cout << " - Padding time:              " << std::setw(8) << get_padding_time_ms() << " ms\n";
+    std::cout << " - Chunking time:             " << std::setw(8) << get_chunking_time_ms() << " ms\n";
+    std::cout << "     - Tile loading time:     " << std::setw(8) << get_conversion_time_ms() << " ms\n";
+    std::cout << "     - Result merging time:   " << std::setw(8) << get_merging_time_ms() << " ms\n";
+    std::cout << "     - Actual AMX time:       " << std::setw(8) << get_actual_amx_time_ms() << " ms\n";
 
     std::cout << "===========================================\n\n";
 }
@@ -163,8 +163,10 @@ std::vector<std::vector<float>> AMXInnerProductBF16::compute_inner_products(std:
 
 void AMXInnerProductBF16::main_multiply(std::vector<std::vector<float>> &results_agg, std::vector<std::vector<bfloat16_t>> &centroids, std::vector<std::vector<bfloat16_t>> &data)
 {
-    int centroid_height = centroids.size() / MAX_SIZE;
-    int data_height = data[0].size() / MAX_COLS;
+    // Calculate the number of chunks needed
+    int centroid_height = (centroids.size() + MAX_SIZE - 1) / MAX_SIZE; // Ceiling division
+    int data_height = (data[0].size() + MAX_COLS - 1) / MAX_COLS;       // Ceiling division
+    int data_width = (data.size() + MAX_SIZE - 1) / MAX_SIZE;           // Ceiling division
 
     auto start_chunking = std::chrono::high_resolution_clock::now();
 
@@ -175,33 +177,35 @@ void AMXInnerProductBF16::main_multiply(std::vector<std::vector<float>> &results
     auto start_conversion = std::chrono::high_resolution_clock::now();
     centroid_format(centroids, centroid_chunk);
     auto end_conversion = std::chrono::high_resolution_clock::now();
-//    conversion_time += end_conversion - start_conversion;
 
     // Tile init!
     __tilecfg tile_data = {0};
     init_tile_config(&tile_data);
 
-    int id = 0;
-    int centroid_id = 0;
-    int chunk_index = 0;
-
     std::vector<bfloat16_t> data_chunk(MAX_SIZE * MAX_COLS);
-    for (int offset = 0; offset < data.size(); offset += MAX_SIZE)
+
+    // Iterate through data chunks
+    for (int data_offset = 0; data_offset < data.size(); data_offset += MAX_SIZE)
     {
         for (int d_offset = 0; d_offset < data[0].size(); d_offset += MAX_COLS)
         {
             // Chunk and format data
             auto start_conversion = std::chrono::high_resolution_clock::now();
-            data_format(data, data_chunk, offset, d_offset);
+            data_format(data, data_chunk, data_offset, d_offset);
             auto end_conversion = std::chrono::high_resolution_clock::now();
             conversion_time += end_conversion - start_conversion;
 
-            // Multiply using AMX
-            for (int i = 0; i < centroid_height; ++i)
+            for (int centroid_offset = 0; centroid_offset < centroids.size(); centroid_offset += MAX_SIZE)
             {
+                int centroid_chunk_row = centroid_offset / MAX_SIZE;
+                int dim_chunk_col = d_offset / MAX_COLS;
+                int centroid_chunk_idx = centroid_chunk_row * data_height + dim_chunk_col;
+
+                if (centroid_chunk_idx >= centroid_chunk.size()) { continue; }
+
                 auto start_AMX = std::chrono::high_resolution_clock::now();
                 _tile_zero(1);
-                _tile_loadd(2, centroid_chunk[centroid_id].data(), STRIDE);
+                _tile_loadd(2, centroid_chunk[centroid_chunk_idx].data(), STRIDE);
                 _tile_loadd(3, data_chunk.data(), STRIDE);
 
                 _tile_dpbf16ps(1, 3, 2);
@@ -209,73 +213,130 @@ void AMXInnerProductBF16::main_multiply(std::vector<std::vector<float>> &results
                 auto end_AMX = std::chrono::high_resolution_clock::now();
                 actual_amx_time += end_AMX - start_AMX;
 
-                // The AMX result is transposed (data x centroids), we need (centroids x data)
+                // Cache-optimized AVX-512 merging loop with prefetching
                 auto start_merge = std::chrono::high_resolution_clock::now();
-                int col_offset = (id / data_height) * MAX_SIZE;
 
-                for (int centroid_row = 0; centroid_row < MAX_SIZE; ++centroid_row)
+                // Calculate the actual sizes for this chunk to avoid processing padding
+                int actual_centroid_size = std::min(MAX_SIZE, static_cast<int>(centroids.size() - centroid_offset));
+                int actual_data_size = std::min(MAX_SIZE, static_cast<int>(data.size() - data_offset));
+
+                // Process in blocks to improve cache locality
+                const int BLOCK_SIZE = 8;
+
+                for (int centroid_block = 0; centroid_block < actual_centroid_size; centroid_block += BLOCK_SIZE)
                 {
-                    int result_row_idx = i * MAX_SIZE + centroid_row;
-                    float* agg_row = &results_agg[result_row_idx][col_offset];
+                    int block_end = std::min(centroid_block + BLOCK_SIZE, actual_centroid_size);
 
-                    // Process 16 elements at a time using AVX-512
-                    int data_col = 0;
-                    for (; data_col <= MAX_SIZE - 16; data_col += 16)
+                    // Prefetch the next block of result rows
+                    if (centroid_block + BLOCK_SIZE < actual_centroid_size)
                     {
-                        // Create index vector for gather operation
-                        // We want to load results_chunk[data_col * MAX_SIZE + centroid_row] for data_col in [0,15]
-                        __m512i indices = _mm512_set_epi32(
-                            (data_col + 15) * MAX_SIZE + centroid_row,
-                            (data_col + 14) * MAX_SIZE + centroid_row,
-                            (data_col + 13) * MAX_SIZE + centroid_row,
-                            (data_col + 12) * MAX_SIZE + centroid_row,
-                            (data_col + 11) * MAX_SIZE + centroid_row,
-                            (data_col + 10) * MAX_SIZE + centroid_row,
-                            (data_col + 9) * MAX_SIZE + centroid_row,
-                            (data_col + 8) * MAX_SIZE + centroid_row,
-                            (data_col + 7) * MAX_SIZE + centroid_row,
-                            (data_col + 6) * MAX_SIZE + centroid_row,
-                            (data_col + 5) * MAX_SIZE + centroid_row,
-                            (data_col + 4) * MAX_SIZE + centroid_row,
-                            (data_col + 3) * MAX_SIZE + centroid_row,
-                            (data_col + 2) * MAX_SIZE + centroid_row,
-                            (data_col + 1) * MAX_SIZE + centroid_row,
-                            data_col * MAX_SIZE + centroid_row
-                        );
+                        for (int prefetch_row = 0; prefetch_row < BLOCK_SIZE && centroid_block + BLOCK_SIZE + prefetch_row < actual_centroid_size; ++prefetch_row)
+                        {
+                            int prefetch_result_row = centroid_offset + centroid_block + BLOCK_SIZE + prefetch_row;
+                            _mm_prefetch(reinterpret_cast<const char *>(&results_agg[prefetch_result_row][data_offset]), _MM_HINT_T0);
+                        }
+                    }
 
-                        __m512 transposed_values = _mm512_i32gather_ps(indices, results_chunk, sizeof(float));
-                        __m512 agg_values = _mm512_loadu_ps(&agg_row[data_col]);
+                    for (int centroid_row = centroid_block; centroid_row < block_end; ++centroid_row)
+                    {
+                        int result_row_idx = centroid_offset + centroid_row;
+                        float *agg_row = &results_agg[result_row_idx][data_offset];
 
-                        __m512 result = _mm512_add_ps(agg_values, transposed_values);
-                        _mm512_storeu_ps(&agg_row[data_col], result);
+                        // Process 16 elements at a time using AVX-512
+                        int data_col = 0;
+
+                        // Main vectorized loop - process 16 elements at once
+                        for (; data_col <= actual_data_size - 16; data_col += 16)
+                        {
+                            // Prefetch next chunk of data if available
+                            if (data_col + 32 < actual_data_size)
+                            {
+                                _mm_prefetch(reinterpret_cast<const char *>(&agg_row[data_col + 32]), _MM_HINT_T0);
+                            }
+
+                            // Create base indices for the 16 elements
+                            __m512i base_indices = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+                            __m512i data_col_vec = _mm512_set1_epi32(data_col);
+                            __m512i stride_vec = _mm512_set1_epi32(MAX_SIZE);
+                            __m512i centroid_offset_vec = _mm512_set1_epi32(centroid_row);
+
+                            // Calculate indices: (data_col + i) * MAX_SIZE + centroid_row
+                            __m512i col_indices = _mm512_add_epi32(data_col_vec, base_indices);
+                            __m512i stride_indices = _mm512_mullo_epi32(col_indices, stride_vec);
+                            __m512i final_indices = _mm512_add_epi32(stride_indices, centroid_offset_vec);
+
+                            // Gather transposed values from results_chunk
+                            __m512 transposed_values = _mm512_i32gather_ps(final_indices, results_chunk, sizeof(float));
+
+                            // Load existing values from results_agg
+                            __m512 agg_values = _mm512_loadu_ps(&agg_row[data_col]);
+
+                            // Add and store back
+                            __m512 result = _mm512_add_ps(agg_values, transposed_values);
+                            _mm512_storeu_ps(&agg_row[data_col], result);
+                        }
                     }
                 }
-
                 auto end_merge = std::chrono::high_resolution_clock::now();
                 merging_time += end_merge - start_merge;
-                centroid_id = (centroid_id + 1) % centroid_chunk.size();
             }
-            chunk_index++;
-            id++;
         }
     }
     auto end_chunking = std::chrono::high_resolution_clock::now();
     chunking_time += end_chunking - start_chunking;
 }
 
-void AMXInnerProductBF16::centroid_format(std::vector<std::vector<bfloat16_t>> &centroids, std::vector<std::vector<bfloat16_t>> &centroid_chunk) {
-    std::vector<bfloat16_t> chunk(MAX_COLS * MAX_SIZE);
-    for (int offset = 0; offset < centroids.size(); offset += MAX_SIZE)
+void AMXInnerProductBF16::centroid_format(std::vector<std::vector<bfloat16_t>> &centroids, std::vector<std::vector<bfloat16_t>> &centroid_chunk) 
+{
+    // Clear any existing chunks
+    centroid_chunk.clear();
+    
+    // Calculate the number of chunks needed
+    int centroid_height = (centroids.size() + MAX_SIZE - 1) / MAX_SIZE;
+    int data_height = (centroids[0].size() + MAX_COLS - 1) / MAX_COLS;
+    
+    // Reserve space for all chunks
+    centroid_chunk.reserve(centroid_height * data_height);
+    
+    std::vector<bfloat16_t> chunk(MAX_COLS * MAX_SIZE, 0);  // Initialize with zeros
+    
+    for (int centroid_offset = 0; centroid_offset < centroids.size(); centroid_offset += MAX_SIZE)
     {
         for (int d_offset = 0; d_offset < centroids[0].size(); d_offset += MAX_COLS)
         {
+            // Clear the chunk
+            std::fill(chunk.begin(), chunk.end(), 0);
+            
             int k = 0;
+            // Process pairs of columns for BF16 packing
             for (int i = 0; i < MAX_COLS; i += 2)
             {
                 for (int j = 0; j < MAX_SIZE; j++)
                 {
-                    chunk[k++] = centroids[offset + j][d_offset + i];
-                    chunk[k++] = centroids[offset + j][d_offset + i + 1];
+                    // Calculate actual indices
+                    int centroid_idx = centroid_offset + j;
+                    int dim_idx1 = d_offset + i;
+                    int dim_idx2 = d_offset + i + 1;
+                    
+                    // Check bounds and copy data
+                    if (centroid_idx < centroids.size())
+                    {
+                        if (dim_idx1 < centroids[centroid_idx].size())
+                        {
+                            chunk[k] = centroids[centroid_idx][dim_idx1];
+                        }
+                        k++;
+                        
+                        if (dim_idx2 < centroids[centroid_idx].size())
+                        {
+                            chunk[k] = centroids[centroid_idx][dim_idx2];
+                        }
+                        k++;
+                    }
+                    else
+                    {
+                        k += 2;  // Skip padding entries
+                    }
                 }
             }
             centroid_chunk.push_back(chunk);
@@ -285,9 +346,26 @@ void AMXInnerProductBF16::centroid_format(std::vector<std::vector<bfloat16_t>> &
 
 void AMXInnerProductBF16::data_format(std::vector<std::vector<bfloat16_t>> &data, std::vector<bfloat16_t> &data_chunk, int data_num, int element_num)
 {
+    // Clear the data chunk
+    std::fill(data_chunk.begin(), data_chunk.end(), 0);
+    
     for (int i = 0; i < MAX_SIZE; i++)
     {
-        std::memcpy(&data_chunk[i * MAX_COLS], &data[data_num + i][element_num], MAX_COLS * sizeof(bfloat16_t));
+        int data_idx = data_num + i;
+        if (data_idx < data.size())
+        {
+            // Calculate how many elements to copy
+            int elements_to_copy = std::min(MAX_COLS, 
+                                          static_cast<int>(data[data_idx].size() - element_num));
+            elements_to_copy = std::max(0, elements_to_copy);
+            
+            if (elements_to_copy > 0)
+            {
+                std::memcpy(&data_chunk[i * MAX_COLS], 
+                           &data[data_idx][element_num], 
+                           elements_to_copy * sizeof(bfloat16_t));
+            }
+        }
     }
 }
 
