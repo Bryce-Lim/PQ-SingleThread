@@ -318,26 +318,11 @@ void AMXInnerProductBF16::centroid_format(std::vector<std::vector<bfloat16_t>> &
 
 void AMXInnerProductBF16::data_format(std::vector<std::vector<bfloat16_t>> &data, std::vector<bfloat16_t> &data_chunk, int data_num, int element_num)
 {
-    // Clear the data chunk
-    std::fill(data_chunk.begin(), data_chunk.end(), 0);
-    
     for (int i = 0; i < MAX_SIZE; i++)
     {
-        int data_idx = data_num + i;
-        if (data_idx < data.size())
-        {
-            // Calculate how many elements to copy
-            int elements_to_copy = std::min(MAX_COLS, 
-                                          static_cast<int>(data[data_idx].size() - element_num));
-            elements_to_copy = std::max(0, elements_to_copy);
-            
-            if (elements_to_copy > 0)
-            {
-                std::memcpy(&data_chunk[i * MAX_COLS], 
-                           &data[data_idx][element_num], 
-                           elements_to_copy * sizeof(bfloat16_t));
-            }
-        }
+        std::memcpy(&data_chunk[i * MAX_COLS],
+                    &data[data_num + i][element_num],
+                    MAX_COLS * sizeof(bfloat16_t));
     }
 }
 
